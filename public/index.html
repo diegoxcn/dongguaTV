@@ -8,6 +8,54 @@
     <meta name="referrer" content="no-referrer">
     <title>E视界</title>
 
+    <!-- SW 版本检测和强制更新（必须在最开头） -->
+    <script data-cfasync="false">
+        (function () {
+            var REQUIRED_SW_VERSION = 'v17';
+            var STORAGE_KEY = 'sw_cleared_' + REQUIRED_SW_VERSION;
+
+            // 如果已经为这个版本清理过，不再重复
+            if (localStorage.getItem(STORAGE_KEY)) return;
+
+            if ('serviceWorker' in navigator && 'caches' in window) {
+                // 获取当前 SW 版本
+                fetch('./sw.js?check=' + Date.now(), { cache: 'no-store' })
+                    .then(function (res) { return res.text(); })
+                    .then(function (text) {
+                        var match = text.match(/CACHE_VERSION\s*=\s*['"]([^'"]+)['"]/);
+                        var serverVersion = match ? match[1] : 'unknown';
+                        console.log('[SW Check] Server version:', serverVersion);
+
+                        // 如果服务器版本是最新的，检查本地 SW
+                        if (serverVersion === REQUIRED_SW_VERSION) {
+                            navigator.serviceWorker.getRegistrations().then(function (regs) {
+                                if (regs.length > 0) {
+                                    // 强制更新 SW
+                                    regs.forEach(function (reg) {
+                                        reg.update();
+                                    });
+                                }
+                            });
+
+                            // 清除旧版本缓存
+                            caches.keys().then(function (names) {
+                                names.forEach(function (name) {
+                                    if (name.indexOf(REQUIRED_SW_VERSION) === -1) {
+                                        console.log('[SW Check] Deleting old cache:', name);
+                                        caches.delete(name);
+                                    }
+                                });
+                            });
+
+                            // 标记已清理
+                            try { localStorage.setItem(STORAGE_KEY, '1'); } catch (e) { }
+                        }
+                    })
+                    .catch(function (e) { console.log('[SW Check] Error:', e); });
+            }
+        })();
+    </script>
+
     <!-- 性能优化：DNS 预解析和预连接 -->
     <link rel="dns-prefetch" href="//api.themoviedb.org">
     <link rel="dns-prefetch" href="//image.tmdb.org">
@@ -3581,14 +3629,27 @@
                     return Math.ceil(items.length / 20) || 1;
                 },
 
+                // 滚动到分类标题位置
+                scrollToSectionTitle(key) {
+                    this.$nextTick(() => {
+                        const refKey = key + '-section';
+                        const sectionRef = this.$refs[refKey];
+                        let el = Array.isArray(sectionRef) ? sectionRef[0] : sectionRef;
+                        if (el) {
+                            const rect = el.getBoundingClientRect();
+                            const targetY = window.pageYOffset + rect.top - 90;
+                            window.scrollTo({
+                                top: Math.max(0, targetY),
+                                behavior: 'smooth'
+                            });
+                        }
+                    });
+                },
+
                 // 切换查看页（带节流保护）
                 changeViewPage(key, delta) {
-                    console.log(`[DEBUG changeViewPage] START: key=${key}, delta=${delta}`);
-                    console.log(`[DEBUG changeViewPage] viewPages[key] BEFORE =`, this.viewPages[key]);
-
                     // 确保初始值存在（使用响应式方式）
                     if (this.viewPages[key] === undefined) {
-                        console.log(`[DEBUG changeViewPage] viewPages[${key}] is undefined, initializing to 1`);
                         this.viewPages = { ...this.viewPages, [key]: 1 };
                     }
 
@@ -3596,44 +3657,21 @@
                     const newPage = currentPage + delta;
                     const totalPages = this.getTotalViewPages(key);
 
-                    console.log(`[DEBUG changeViewPage] currentPage=${currentPage}, newPage=${newPage}, totalPages=${totalPages}`);
-
                     // 本地翻页（不需要 API）可以立即执行
                     if (newPage >= 1 && newPage <= totalPages) {
-                        console.log(`[DEBUG changeViewPage] Condition passed, setting viewPages[${key}] = ${newPage}`);
                         this.viewPages = { ...this.viewPages, [key]: newPage };
-                        console.log(`[DEBUG changeViewPage] viewPages[key] AFTER =`, this.viewPages[key]);
                         // 翻页后滚动到分类标题位置
-                        this.$nextTick(() => {
-                            const refKey = key + '-section';
-                            const sectionRef = this.$refs[refKey];
-                            let el = Array.isArray(sectionRef) ? sectionRef[0] : sectionRef;
-                            if (el) {
-                                // 使用 scrollIntoView 更可靠
-                                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                // 额外偏移（导航栏高度）
-                                setTimeout(() => {
-                                    window.scrollBy({ top: -80, behavior: 'smooth' });
-                                }, 100);
-                            }
-                        });
-                    } else {
-                        console.log(`[DEBUG changeViewPage] Condition FAILED: newPage=${newPage}, totalPages=${totalPages}`);
-
-                        // 如果是因为数据还没加载完导致翻页失败，记录目标页码
-                        // 等数据加载完成后自动翻页
-                        if (newPage > totalPages && this.rowConfigs[key].page < (this.rowConfigs[key].totalPages || 999)) {
-                            console.log(`[DEBUG changeViewPage] Setting pending page for ${key}: ${newPage}`);
-                            this._pendingPage = this._pendingPage || {};
-                            this._pendingPage[key] = newPage;
-                        }
+                        this.scrollToSectionTitle(key);
+                    } else if (newPage > totalPages && this.rowConfigs[key].page < (this.rowConfigs[key].totalPages || 999)) {
+                        // 需要加载更多数据
+                        this._pendingPage = this._pendingPage || {};
+                        this._pendingPage[key] = newPage;
                     }
 
                     // 如果需要加载更多数据，添加节流保护（500ms 间隔）
                     if (newPage >= totalPages && this.rowConfigs[key].page < (this.rowConfigs[key].totalPages || 999)) {
                         // 检查是否正在加载中
                         if (this.pageLoadingKeys[key]) {
-                            console.log(`[${key}] 请求过于频繁，请稍后再试`);
                             return;
                         }
                         // 设置加载锁
@@ -3645,10 +3683,10 @@
                             if (this._pendingPage && this._pendingPage[key]) {
                                 const pendingPage = this._pendingPage[key];
                                 const newTotalPages = this.getTotalViewPages(key);
-                                console.log(`[DEBUG] Data loaded, checking pending page ${pendingPage}, new totalPages=${newTotalPages}`);
                                 if (pendingPage <= newTotalPages) {
-                                    console.log(`[DEBUG] Auto-flipping to page ${pendingPage}`);
                                     this.viewPages = { ...this.viewPages, [key]: pendingPage };
+                                    // 翻页后滚动到分类标题位置
+                                    this.scrollToSectionTitle(key);
                                 }
                                 delete this._pendingPage[key];
                             }
@@ -5037,13 +5075,46 @@
         }).mount('#app');
     </script>
 
-    <!-- Register Service Worker -->
+    <!-- Register Service Worker with Auto-Update -->
     <script data-cfasync="false">
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('./sw.js')
-                    .then(reg => console.log('SW registered: ', reg.scope))
-                    .catch(err => console.log('SW registration failed: ', err));
+                    .then(reg => {
+                        console.log('[SW] Registered:', reg.scope);
+
+                        // 立即检查更新
+                        reg.update();
+
+                        // 定期检查更新（每30分钟）
+                        setInterval(() => {
+                            reg.update();
+                            console.log('[SW] Checking for updates...');
+                        }, 30 * 60 * 1000);
+
+                        // 监听新版本安装
+                        reg.addEventListener('updatefound', () => {
+                            const newWorker = reg.installing;
+                            console.log('[SW] New version found, installing...');
+
+                            newWorker.addEventListener('statechange', () => {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    // 新版本已安装，提示用户刷新
+                                    console.log('[SW] New version ready, will refresh...');
+                                }
+                            });
+                        });
+                    })
+                    .catch(err => console.log('[SW] Registration failed:', err));
+
+                // 当新 SW 激活时自动刷新页面（防止无限循环）
+                let swRefreshing = false;
+                navigator.serviceWorker.addEventListener('controllerchange', () => {
+                    if (swRefreshing) return;
+                    swRefreshing = true;
+                    console.log('[SW] Controller changed, refreshing...');
+                    window.location.reload();
+                });
             });
         }
     </script>

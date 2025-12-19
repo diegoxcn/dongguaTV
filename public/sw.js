@@ -1,6 +1,6 @@
 // Service Worker with Image Caching for dongguaTV
-// v11: Fixed info modal rendering issue
-const CACHE_VERSION = 'v11';
+// v17: Fixed infinite refresh loop
+const CACHE_VERSION = 'v17';
 const STATIC_CACHE = 'donggua-static-' + CACHE_VERSION;
 const IMAGE_CACHE = 'donggua-images-' + CACHE_VERSION;
 
@@ -30,7 +30,7 @@ const IMAGE_HOSTS = [
 const MAX_IMAGE_CACHE = 500;
 
 self.addEventListener('install', event => {
-    console.log('[SW] Installing...');
+    console.log('[SW] Installing v12...');
     event.waitUntil(
         caches.open(STATIC_CACHE)
             .then(cache => {
@@ -38,16 +38,17 @@ self.addEventListener('install', event => {
                 return cache.addAll(STATIC_URLS);
             })
     );
+    // 强制立即激活新版本，不等待旧版本关闭
     self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
-    console.log('[SW] Activating...');
+    console.log('[SW] Activating v12...');
     event.waitUntil(
         caches.keys().then(cacheNames => {
             return Promise.all(
                 cacheNames.map(cacheName => {
-                    // 删除旧版本缓存
+                    // 删除所有旧版本缓存
                     if (cacheName !== STATIC_CACHE && cacheName !== IMAGE_CACHE) {
                         console.log('[SW] Deleting old cache:', cacheName);
                         return caches.delete(cacheName);
@@ -67,17 +68,44 @@ self.addEventListener('fetch', event => {
         return;
     }
 
-    // 策略2：静态资源 - Cache First
+    // 策略2：HTML 页面 - Network First (确保获取最新版本)
+    if (event.request.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname === '/') {
+        event.respondWith(
+            fetch(event.request)
+                .then(response => {
+                    // 更新缓存
+                    const responseToCache = response.clone();
+                    caches.open(STATIC_CACHE).then(cache => {
+                        cache.put(event.request, responseToCache);
+                    });
+                    return response;
+                })
+                .catch(() => caches.match(event.request))
+        );
+        return;
+    }
+
+    // 策略3：静态资源 (CSS/JS) - Stale-While-Revalidate
+    // 先返回缓存，同时后台更新
     if (STATIC_URLS.some(staticUrl => event.request.url.includes(staticUrl))) {
         event.respondWith(
-            caches.match(event.request).then(cached => {
-                return cached || fetch(event.request);
+            caches.open(STATIC_CACHE).then(cache => {
+                return cache.match(event.request).then(cached => {
+                    const fetchPromise = fetch(event.request).then(response => {
+                        if (response && response.status === 200) {
+                            cache.put(event.request, response.clone());
+                        }
+                        return response;
+                    });
+                    // 返回缓存（如果有），同时后台更新
+                    return cached || fetchPromise;
+                });
             })
         );
         return;
     }
 
-    // 策略3：只处理同源请求 - Network First
+    // 策略4：只处理同源请求 - Network First
     // 跳过跨域请求（如 m3u8 视频流），避免 CORS 错误
     if (url.origin !== self.location.origin) {
         return; // 让浏览器直接处理跨域请求

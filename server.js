@@ -196,12 +196,12 @@ app.use(compression({
 app.use(cors());
 app.use(bodyParser.json());
 
-// ========== 静态资源配置 (带长缓存) ==========
+// ========== 静态资源配置 ==========
 
-// 静态资源 30天缓存 (libs 目录 - CSS/JS)
+// 静态资源 30天缓存 (libs 目录 - CSS/JS) - 这些文件不会变化
 app.use('/libs', express.static('public/libs', {
-    maxAge: '30d',  // 30天浏览器缓存
-    immutable: true,  // 告诉浏览器文件不会变化
+    maxAge: '30d',
+    immutable: true,
     etag: true,
     lastModified: true
 }));
@@ -213,9 +213,17 @@ app.use('/cache', express.static('public/cache', {
     etag: true
 }));
 
-// HTML 和其他静态文件 - 30天缓存
+// ⚠️ 关键：HTML 和 Service Worker 不缓存，确保用户获取最新版本
+app.get(['/', '/index.html', '/sw.js'], (req, res, next) => {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    next();
+});
+
+// 其他静态文件 - 1小时缓存
 app.use(express.static('public', {
-    maxAge: '30d',
+    maxAge: '1h',
     etag: true,
     lastModified: true
 }));
